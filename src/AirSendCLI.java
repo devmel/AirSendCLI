@@ -1,9 +1,11 @@
+import java.io.InputStreamReader;
 import java.io.PrintStream;
 import java.util.Arrays;
 import java.util.Date;
 
 import com.devmel.content.SimpleIPLocator;
 import com.devmel.devices.AirSend;
+import com.devmel.devices.SimpleIPException;
 import com.devmel.rf.Frame;
 import com.devmel.rf.Packet;
 import com.devmel.tools.Hexadecimal;
@@ -17,7 +19,7 @@ public class AirSendCLI {
 	public static void main(String[] args) {
 		CommandLineParser cli = new CommandLineParser(args);
 		SimpleIPLocator deviceInfo = null;
-		int datarate = 3000;
+		int datarate = -1;
 		int frequency = 433920000;
 		boolean frequencyset = false;
 		SearchQRCode search = null;
@@ -83,7 +85,6 @@ public class AirSendCLI {
 		long startTime = System.nanoTime();
 		deviceInfo.setTimeout(8000);
 		AirSend airsend = new AirSend(deviceInfo);
-		airsend.setTimeout(8000);
 		try {
 			if(airsend.open()){
 				//Read sensors
@@ -106,31 +107,69 @@ public class AirSendCLI {
 
 				//Read protocols
 				if(cli.hasOption("rp")){
+					if(datarate <= 0)
+						datarate = 7500;
 					int lfrequency = 433785000;
 					if(frequencyset)
 						lfrequency = frequency;
 					System.out.println("***** Read protocol : "+lfrequency+" *****");
-					byte[] config = AirSend.buildConfigOOK(lfrequency, 7500, true, airsend.getOscillator());
+					byte[] config = AirSend.buildConfigOOK(lfrequency, datarate, true, airsend.getOscillator());
 					airsend.setConfiguration(config);
 					int duration = 10000;
+					final InputStreamReader fileInputStream = new InputStreamReader(System.in);
 					try{
 						duration = Integer.decode(cli.getOptionValue("rp"));
 					}catch(Exception e){}
 					long end = System.currentTimeMillis() + duration;
+					long lastAlive = System.currentTimeMillis();	//Keep alive
 					boolean hasNext = true;
 					final Frame f = new Frame();
-					while(hasNext == true){
-						if(end <= System.currentTimeMillis())
+					boolean resetConf = true;
+					int error = 0;
+					while(hasNext == true && airsend.open()){
+						if(fileInputStream.ready()){
 							hasNext = false;
-						
-						if(airsend.read(f, hasNext)){
-							if(f.getPacketCount() > 0){
-								for(int i=0;i<f.getPacketCount();i++){
-									Packet p = f.getPacket(i);
-									String date = String.format("%1$te/%1$tm/%1$tY %1$tH:%1$tM:%1$tS", new Date());
-									System.out.println(date+" : "+Packet.getProtocolName(p.getProtocolId())+" "+p.getSourceAddress()+" "+p.getCommand()+" "+p.getRollingCounter());
+							System.err.println("Terminate");
+						}
+						if(duration > 1 && end <= System.currentTimeMillis())
+							hasNext = false;
+						if(resetConf || (lastAlive+60000) < System.currentTimeMillis()){
+							airsend.setConfiguration(config);
+							resetConf = false;
+							lastAlive = System.currentTimeMillis();
+						}
+						try{
+							if(airsend.read(f, hasNext)){
+								if(f.getPacketCount() > 0){
+									for(int i=0;i<f.getPacketCount();i++){
+										Packet p = f.getPacket(i);
+										String date = String.format("%1$te/%1$tm/%1$tY %1$tH:%1$tM:%1$tS", new Date());
+										System.out.println(date+" : "+Packet.getProtocolName(p.getProtocolId())+" "+p.getSourceAddress()+" "+p.getCommand()+" "+p.getRollingCounter());
+									}
 								}
+								lastAlive = System.currentTimeMillis();
 							}
+                           	error = 0;
+						}catch(SimpleIPException ex){
+                            if(ex.getCode() == SimpleIPException.BUSY){
+    							System.err.println("Wait, device busy");
+                            }else if(ex.getCode() == SimpleIPException.CONNECTION_LOST 
+                            		|| ex.getCode() == SimpleIPException.CLOSED 
+                            		|| ex.getCode() == SimpleIPException.TIMEOUT){
+                            	airsend.close();
+                            	airsend = new AirSend(deviceInfo);
+                            }else if(ex.getCode() != SimpleIPException.RESPONSE_LOST){
+                                throw ex;
+                            }else{
+                            	error++;
+                            }
+                        	Thread.sleep(1000);
+							resetConf = true;
+						}
+						if(error > 4){
+                        	airsend.close();
+                        	airsend = new AirSend(deviceInfo);
+							resetConf = true;
 						}
 					}
 				}
@@ -241,21 +280,57 @@ public class AirSendCLI {
 
 				//Read raw
 				if(cli.hasOption("r")){
+					if(datarate <= 0)
+						datarate = 3000;
 					System.out.println("***** Read raw data : "+frequency+" at "+datarate+"Hz *****");
 					byte[] config = AirSend.buildConfigOOK(frequency, datarate, true, airsend.getOscillator());
+					boolean resetConf = true;
 					airsend.setConfiguration(config);
 					int duration = 10000;
 					try{
 						duration = Integer.decode(cli.getOptionValue("r"));
 					}catch(Exception e){}
+					final InputStreamReader fileInputStream = new InputStreamReader(System.in);
 					long end = System.currentTimeMillis() + duration;
 					boolean hasNext = true;
-					while(hasNext == true){
-						if(end <= System.currentTimeMillis())
+					int error = 0;
+					while(hasNext == true && airsend.open()){
+						if(fileInputStream.ready()){
 							hasNext = false;
-						byte[] data = airsend.read(500, hasNext);
-						if(data != null)
-							System.out.println(Hexadecimal.fromBytes(data));
+							System.err.println("Terminate");
+						}
+						if(duration > 1 && end <= System.currentTimeMillis())
+							hasNext = false;
+						if(resetConf){
+							airsend.setConfiguration(config);
+							resetConf = false;
+						}
+						try{
+							byte[] data = airsend.read(500, hasNext);
+							if(data != null)
+								System.out.println(Hexadecimal.fromBytes(data));
+                           	error = 0;
+						}catch(SimpleIPException ex){
+                            if(ex.getCode() == SimpleIPException.BUSY){
+    							System.err.println("Wait, device busy");
+                            }else if(ex.getCode() == SimpleIPException.CONNECTION_LOST 
+                            		|| ex.getCode() == SimpleIPException.CLOSED 
+                            		|| ex.getCode() == SimpleIPException.TIMEOUT){
+                            	airsend.close();
+                            	airsend = new AirSend(deviceInfo);
+                            }else if(ex.getCode() != SimpleIPException.RESPONSE_LOST){
+                                throw ex;
+                            }else{
+                            	error++;
+                            }
+                        	Thread.sleep(1000);
+							resetConf = true;
+						}
+						if(error > 4){
+                        	airsend.close();
+                        	airsend = new AirSend(deviceInfo);
+							resetConf = true;
+						}
 					}
 				}
 	
@@ -263,6 +338,8 @@ public class AirSendCLI {
 				if(cli.hasOption("w")){
 					String data = cli.getOptionValue("w");
 					if(data != null){
+						if(datarate <= 0)
+							datarate = 3000;
 						System.out.println("***** Write raw data : "+frequency+" at "+datarate+"Hz *****");
 						byte[] rData = null;
 						try{
@@ -311,13 +388,13 @@ public class AirSendCLI {
 
 	public static void listProtocolsCommands(PrintStream out){
 		out.println("--------------- Protocols --------------");
-		int[] protocols = new int[]{Packet.Protocol_AVD, Packet.Protocol_B12, Packet.Protocol_B12_1, Packet.Protocol_BLYP0, Packet.Protocol_DIO, Packet.Protocol_DOOYA, Packet.Protocol_EQT, Packet.Protocol_EV1527, Packet.Protocol_EV1527_1, Packet.Protocol_EVF, Packet.Protocol_FLOR, Packet.Protocol_GSA, Packet.Protocol_GT7000, Packet.Protocol_HCTEL, Packet.Protocol_OTI, Packet.Protocol_PT2262, Packet.Protocol_RFY, Packet.Protocol_X10};
+		int[] protocols = Packet.getList();
 		out.println("ID\t : NAME");
 		for(int protocol : protocols){
 			out.println(protocol+"\t : "+Packet.getProtocolName(protocol));
 		}
 		out.println("--------------- Commands ---------------");
-		int[] commands = new int[]{Packet.Command_OFF, Packet.Command_ON, Packet.Command_PROG, Packet.Command_STOP, Packet.Command_DOWN, Packet.Command_UP, Packet.Command_TOGGLE, Packet.Command_0, Packet.Command_1, Packet.Command_2, Packet.Command_3};
+		int[] commands = new int[]{Packet.Command_OFF, Packet.Command_ON, Packet.Command_PROG, Packet.Command_STOP, Packet.Command_DOWN, Packet.Command_UP, Packet.Command_TOGGLE};
 		out.println("ID\t : NAME");
 		for(int command : commands){
 			out.println(command+"\t : "+getCommandName(command));
@@ -347,18 +424,6 @@ public class AirSendCLI {
 			break;
 			case Packet.Command_TOGGLE:
 			cmd = "Command_TOGGLE";
-			break;
-			case Packet.Command_0:
-			cmd = "Command_0 HEX Key";
-			break;
-			case Packet.Command_1:
-			cmd = "Command_1 HEX Key";
-			break;
-			case Packet.Command_2:
-			cmd = "Command_2 HEX Key";
-			break;
-			case Packet.Command_3:
-			cmd = "Command_3 HEX Key";
 			break;
 		}
 		return cmd;
